@@ -2,7 +2,7 @@
 
 #  Webcoding
 
-> 这篇文章从简单复杂展现了基于c的网络编程思想，代码作为理解网络的必要，更重要的是体现网络中的设计哲学,我更建议的是尝试手敲代码，根据这份readme所提供的信息来尝试，为了更清晰的展现网络结构，所有的代码就只是对应功能的简单实现，极为粗糙。相信你在这段过程中，可以去体悟到网络设计的底层实现。现在我主要进行的是c的tcp和udp的简单实现，后续会加入对数据报文，ip协议栈，和对go的底层设计的接口分析。尽管并不是自顶向下的构成分析，但是从对一个网络初学者而言，这是不错的起点
+> 这篇文章展现了基于c的网络编程，代码作为理解设计思想的必要，更重要的是体现网络中的设计哲学,我更建议你的是手敲代码，根据这份readme所提供的信息来尝试，为了更清晰的展现网络结构，所有的代码就只是对应功能的简单实现。相信你在这段过程中，可以去体悟到网络设计的底层实现。现在我主要进行的是c的tcp和udp的简单实现，后续会加入对数据报文，ip协议栈，和对go的底层设计的接口分析。尽管并不是自顶向下的构成分析，但是从对一个网络初学者而言，这是不错的起点
 
 ![Language](https://img.shields.io/badge/language-C-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20WSL-green.svg)
@@ -27,7 +27,7 @@
 ## 详细介绍 (Introduction)
 
 ### 01 Basic (基础概念)
-网络编程的基石，主要解决不同机器间的数据表示差异。
+网络通信的基石，主要解决不同层次上的数据表示差异。
 
 * **01_endian (字节序)**
     * 展示了计算机 **小端存储 (Little-Endian)** 与 **大端存储 (Big-Endian)** 的区别。
@@ -40,23 +40,23 @@
      __THROW __attribute__ ((__const__));
     ```
     * 实现 **主机字节序 (Host)** 向 **网络字节序 (Network)** 的转换 (如 `htonl`, `htons`)。
-    * **解释一下 `__THROW` 和 `__attribute__`**：这其实是写给编译器看的“小抄”。`__THROW` 告诉编译器这函数绝不抛出异常，`__const__` 告诉编译器这函数是“纯函数”（只依赖输入，没副作用）。这样编译器就能大胆地做优化，把多余的调用给省掉。
+    * **解释一下 `__THROW` 和 `__attribute__`**：这其实是写给编译器看的tip。`__THROW` 告诉编译器这函数绝不抛出异常，`__const__` 告诉编译器这函数是“纯函数”（只依赖输入，没副作用）。这样编译器就能大胆地做优化，把多余的调用给省掉。
 
 * **03_inet_pton (IP地址转换)**
     * 全称 *Presentation to Numeric*。
     * 将点分十进制字符串 (如 "192.168.1.1") 转换为网络传输用的 32位无符号整数。
     ```c
     int inet_pton (int __af, const char *__restrict __cp,
-		      void *__restrict __buf) __THROW;
+	void *__restrict __buf) __THROW;
     ```
-    * **为什么需要一个 void 类型**：这里设计得很贼，因为 IPv4 用 `struct in_addr` (4字节)，IPv6 用 `struct in6_addr` (16字节)。用 `void*` 就能像万能插头一样，不管你是哪种协议，都能把转换后的二进制数据填进去。
+    * **为什么需要一个 void 类型**：这里设计得很巧妙，因为 IPv4 用 `struct in_addr` (4字节)，IPv6 用 `struct in6_addr` (16字节)。用 `void*` 就能像万能插头一样，不管你是哪种协议，都能把转换后的二进制数据填进去。
 
 * **04_inet_ntop (IP地址还原)**
     * 全称 *Numeric to Presentation*。
     * 将 32位网络字节序整数还原为人类可读的 IP 字符串。
     ```c
     extern const char *inet_ntop (int __af, const void *__restrict __cp,
-			      char *__restrict __buf, socklen_t __len)
+	char *__restrict __buf, socklen_t __len)
      __THROW;
     ```
     * `extern` 意味着这是个外部引用，`__len` 则是为了防止缓冲区溢出（C语言老生常谈的内存安全问题），这一部分被认为是add部分单独开一行。
@@ -85,8 +85,8 @@
 struct sockaddr_in
 {
  __SOCKADDR_COMMON (sin_);
- in_port_t sin_port;			/* Port number.  */
- struct in_addr sin_addr;		/* Internet address.  */
+ in_port_t sin_port;/* Port number. */
+ struct in_addr sin_addr;/* Internet address. */
 
  /* Pad to size of `struct sockaddr'.  */
  // ... padding ...
@@ -106,11 +106,11 @@ struct sockaddr
 ```
 
 
-* 可以看到，这实际上是进行了一个数据压缩的过程，这样的设计展现了编程最核心的问题，自然语言和二进制之间的矛盾指出
+* 可以看到，这实际上是进行了一个数据压缩的过程，这样的设计展现了编程最核心的问题，自然语言编程和机器二进制构成的矛盾
 
 
 * **03_bind**
-* bind这个函数主要是为了固定ip和端口号，根据这个需求我们可以很容易理解信息的接收方更加需要这个需求。
+* bind这个函数主要是为了固定ip和端口号，根据这个函数的面向我们可以很容易理解信息的接收方更加需要这个需求。
 
 
 
@@ -122,14 +122,14 @@ int bind (int __fd, __CONST_SOCKADDR_ARG __addr, socklen_t __len)
 
 * 在tcp/udp编程时我们一般简单的就把server称为需要绑定的一方，但这实际上是由于信息接受和发送的相对关系所决定的，在多播和组播中我们能够看到这一点的进一步体现
 * **04_recvfrom**
-* recvform是接受函数
+* recvform是udp接受函数
 ```c
 recvfrom (int __fd, void *__restrict __buf, size_t __n, int __flags,
     __SOCKADDR_ARG __addr, socklen_t *__restrict __addr_len)
 ```
 
 
-* 这里需要注意的是recvfrom是接受别的主机的数据，所以我们需要预先创建空的结构体供其填入，并且其还更高addrlen来作为接受到的信息长度输出，这种设计使得udp可以很简单的实现多线程工作，代价就是每一个client都需要相应的结构体来对应，而我们将会在后续看到，因为tcp要求的三次握手四次挥手，导致tcp的设计走向了截然不同的道路
+* 这里需要注意的是recvfrom是接受别的主机的数据，所以我们需要预先创建空的结构体供其填入，并且还改变addrlen来作为接受到的信息长度输出，这种设计使得udp可以很简单的实现多线程工作，代价就是每一个client都需要相应的结构体来对应，而我们将会在后续看到，因为tcp要求的三次握手，导致tcp的设计走向了截然不同的道路
 
 
 * **05_server&&06_clieng** * 这一段是具体的udp的客户端和服务端的运行代码。本质上就是调用上述函数具体实现通信过程
@@ -141,7 +141,7 @@ exit(1);
 ```
 
 
-* 这一段保证了运行程序时输入了正确的ip和port，这里需要注意的是，client里面输入的也是server的ip和port，因为client根本不需要在乎自己，他只需要保证数据交互
+* 这一段保证了运行程序时输入了ip和port，这里需要注意的是，client里面输入的也是server的ip和port，因为client根本不需要在乎自己，他只需要保证数据交互
 
 
 ```c
@@ -153,7 +153,7 @@ exit(1);
 ```
 
 
-* 这里体现了recvfrom的核心用处，是udp传输中的核心所在，通过接受数据，将数据发送主机的ip记录下来，用来进行sendto操作，这种设计使得udp的多client能极为容易理解设计，尽管在实际执行写起来的时候稍微有点冗余。
+* 这里体现了recvfrom的核心用处，是udp传输中的核心所在，通过接受数据，将数据发送主机的ip记录下来，用来进行sendto操作，这种设计使得udp的多client能极为容易实现，尽管在实际执行写起来的时候稍微有点冗余。
 * **udp通信交互流程简图**：
 
 
@@ -190,7 +190,7 @@ extern char *fgets (char *__restrict __s, int __n, FILE *__restrict __stream)
 *Trivial File Transfer Protocol* (简单文件传输协议)。
 
 * **begin**
-* 在开始之前我想简单的介绍一下理解tftp的核心所在，作为基于udp协议的小文件传输协议，在c中实现最让人恼火的就是**手动构建和分析二进制报文**，你需要像做手术一样去拼凑每一个字节。
+* 在开始之前我想简单的介绍一下理解tftp的核心所在，作为基于udp协议的小文件传输协议，在c中实现tftp最让人恼火也最为关键的就是**手动构建和分析二进制报文**，你需要去拼凑每一个字节。
 
 
 * **01_tftp_client**
@@ -207,7 +207,7 @@ extern char *fgets (char *__restrict __s, int __n, FILE *__restrict __stream)
 ```
 
 
-* 代码里用了一个很骚的操作 `sprintf` 来拼接：
+* 代码里用了一个很巧妙的操作 `sprintf` 来拼接：
 ```c
 packet_buf_len = sprintf((char*)packet_buf,"%c%c%s%c%s%c",0,1,filename,0,"octet",0);
 ```
@@ -223,7 +223,7 @@ unsigned char packet_buf[1024]= "";
 ```
 
 
-* packet_buf 用来接受server发送来的数据，这里发送数据全部使用unsigned char 类型来进行发送，而通过数据来储存这个数据，意味者可以简单直接的接受数据包头的二进制数据来进行分析
+* packet_buf 用来接受server发送来的数据，这里发送数据全部使用unsigned char 类型来进行发送，而通过数据来储存这个数据，意味者可以简单直接的通过使用这个数组来对数据包头进行解析
 ```c
 //错误信息
 if(packet_buf[1]== 5){...exit(1)}
@@ -232,7 +232,7 @@ if(packet_buf[1]==3){//进行下一步处理}
 ```
 
 
-* 需要注意的是首先要去判断是否存在相应文件，可以用bool或int类型来标识，如果没有则需要先创建相应文件
+* 需要注意的是首先要去判断是否存在相应文件，可以用bool或int类型数据来标识，如果没有则需要先创建相应文件
 
 
 * **Part 3: 验证与ACK (手动可靠性)**
