@@ -389,11 +389,80 @@ struct ip_mreq
 
   
 ### 05 TCP Socket (TCP 通信)
-
-面向连接的、可靠的流式传输协议。
-
-* 实现标准的三次握手建立连接及数据传输。
-* 涵盖 `listen`, `accept`, `connect` 等核心 API。
+* **background**
+  * 尽管再这里tcp和udp的最大区别是tcp有了三次握手四次挥手来保证数据传输，但我们在调用函数进行编程时，这些内容是已经封装好的，换句话说，我们在这里还是去从应用层的角度去考虑事情
+  * 但是tcp的这种设计使得它不能像udp一样通过简单的结构体来管理客户端，建立连接和断开连接的需求使得必须维持监听状态作为管道系统，所以新建socket来管理这个管道就成为必要的，那么并发的关键现在就是如何去管理这些socket
+  * 所以从这里派生出两种思路，一种是将原来阻塞的函数转变为非阻塞的，另一种就是多线程和多携程，在我们后续可以看到的是，这一点并不是矛盾的
+ * **01_client** 
+   * 这里展现的是tcp的客户端，在创建好socket和封装好server结构体后，我们首先要调用封装好的函数去建立底层连接
+   ```c
+   extern int connect (int __fd, __CONST_SOCKADDR_ARG __addr, socklen_t __len);
+   ```
+   * todo解释connetc函数内部的底层机制
+   * 在client这一方只有一个socket作为对应接口所以说我们这里的send函数直接对这个socket进行操作即可，并不需要将server的对应信息也传入进去。
+   ```c
+   extern ssize_t send (int __fd, const void *__buf, size_t __n, int __flags);
+   ```
+   * 这里的逻辑就是connetc之后client和server之间已经建立了稳定的通道联系，不需要再用结构体来指向一个server
+* **adding**
+  * 需要注意的是，无论是send还是sendto发送时都不要用整个缓冲区数组大小，而是用strlen
+  * todo解释这种现象
+* **02_server.c**
+  * 这里是tcp服务器的实例。在创建好socket和填充绑定好结构体后，首先要将socket设置为监听状态
+  ```c
+  extern int listen (int __fd, int __n) __THROW;
+  ```
+  * `fd`:是之前创建的文件描述符
+  * `n`:是最大的监听数量
+  * todo：解释设置监听状态的必要性和底层原理
+  * 在设置好监听状态后要通过accept来获取到client connect的连接请求
+  ```c
+  extern int accept (int __fd, __SOCKADDR_ARG __addr,
+	 socklen_t *__restrict __addr_len);
+  ```
+  * 需要注意的是`_addr`是client的相关网络数据信息，和recvfrom一样，需要预先设置空结构体填充，这里主要是适用于日志功能和其他
+  * 最重要的点是，在这里返回了一个int值，这个int就是用来管理和新建client连接的文件描述符，这样在一个tcp系统中存在两种文件描述符，一种是用来监听的socket，另一种是用来进行通信的socket的，这两种文件描述符的存在实际上是tcp数据流连接的必然结果，udp是数据包连接，所以只需要知道对应地址进行信息发送即可，但是tcp是流式连接，需要一个文件描述符来管理这个io流
+  ```c
+  extern ssize_t recv (int __fd, void *__buf, size_t __n, int __flags);
+  ```
+  * 在这里recv和send函数一样，都只需要对这个socket进行处理就行，但是在这里和recvfrom不同的是，recv的返回值必须做处理
+  * 在tcp中不允许发送长度为0的数据包，因为这被认为是断开连接的标志，所以必须判断recv的返回值是否为0的情况，这里的异常有两种情况，所以必须要有数据结构承载来进行多次判断逻辑
+  * 在这里我们可以看到当我们去对accept产生的socekt的进行读写操作时，监听socket时没有办法访问的，后续的代码都是在致力于解决这个问题。
+* **summary**
+  * todo补充一下tcp连接的图形化cs框架描述
+* **03_server_fork.c**
+  * 这里是通过多进程的方式来解决、
+  ```c
+  extern __pid_t fork (void) __THROWNL;
+  ```
+  * 这个函数直接调用就可以，返回pid作为进程的标识符
+  * todo解释一下pid的底层原理，解释一下不同pid大小对应的不同进程类型
+  * 我们对不同进程分别处理，父进程继续监听，子进程用来处理io流，来实现阻塞函数的分别处理
+  * 在这里需要注意的是进程死亡垃圾回收的问题，我们在这里采用signal来捕捉处理进程死亡的信号
+  ```c
+    extern __sighandler_t __REDIRECT_NTH (signal,
+		      (int __sig, __sighandler_t __handler),
+		  __sysv_signal);
+  ```
+  * todo解释调整这段代码的结构
+  * `_sig`:是系统级别的信号，这个用来选择该去标识对哪一个信号进行处理
+  * `_handler`:是自定义函数，当捕捉到这个信号时，自动运行这个函数
+  ```c
+  void handler(int sig){
+    while((waitpid(-1,NULL,WNOHANG))>0){}
+  }
+  ```
+  * `int sig`为了增强函数的复用性
+  * `waitpid` 用来回收所有的死亡进程
+* **adding** 
+  ```c
+  extern __pid_t waitpid (__pid_t __pid, int *__stat_loc, int __options);
+  ```
+  * `_pid_t`:这个是用来标记那些线程需要处理，-1代表所用线程
+  * `_stat_loc`:todo解释这个参数作用
+  * `_options`:todo解释这个参数和wnohang是什么意思
+* **04_server_thread.c**
+  * 使用多线程进行处理
 
 ---
 
