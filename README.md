@@ -312,8 +312,6 @@ recvfrom(Echo)
       // 允许重用本地地址和端口，解决 "Address already in use" 错误
       setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
       ```
-
-
 * **01_broadcast_send** 
   * 这个文件展现的是 broadcast 的发送方。和 tcp，udp 编程不同，在广播和多播里并没有传统意义上的 cs 框架，而是信息发送和接受的相对关系。
   * 这里采用 sendto 函数，除了需要额外对 socket 做功能添加外，基本上和 udp 的 client 思路一致。
@@ -427,224 +425,221 @@ recvfrom(Echo)
   * `__n` 实际上决定了这些队列（通常是全连接队列）的大小。如果队列满了，新的连接请求就会被直接丢弃或拒绝（SYN Flood 攻击也是针对这里）。
 
 
-* 设置好监听状态后，通过 `accept` 从全连接队列中取出一个已完成的连接。
+  * 设置好监听状态后，通过 `accept` 从全连接队列中取出一个已完成的连接。
 
 
-```c
-extern int accept (int __fd, __SOCKADDR_ARG __addr,
- socklen_t *__restrict __addr_len);
+    ```c
+    extern int accept (int __fd, __SOCKADDR_ARG __addr,
+    socklen_t *__restrict __addr_len);
 
-```
-
-
-* **两个 FD 的故事**：
-* `accept` 返回的 `int` 是一个**全新的文件描述符** (Connected Socket)。
-* **设计哲学**：原来的 `sockfd` 只负责把人领进门；`accept` 返回的 `fd` 专门负责这一桌的通信。这种分离设计使得 TCP Server 可以同时处理握手请求和数据传输。
+    ```
 
 
-* **Recv 的返回值判断**：
+  * **两个 FD 的故事**：
+  * `accept` 返回的 `int` 是一个**全新的文件描述符** (Connected Socket)。
+  * **设计哲学**：原来的 `sockfd` 只负责把人领进门；`accept` 返回的 `fd` 专门负责这一桌的通信。这种分离设计使得 TCP Server 可以同时处理握手请求和数据传输。
 
 
-```c
-extern ssize_t recv (int __fd, void *__buf, size_t __n, int __flags);
-
-```
+  * **Recv 的返回值判断**：
 
 
-* `> 0`: 接收到的字节数。
-* `= 0`: **重要！** 这代表对端关闭了连接 (FIN 包)。TCP 是全双工的，0 字节读意味着 Read 通道关闭。
-* `< 0`: 出错 (Error)，需要检查 errno。
-* 而在dup中可以直接发送长度为0的数据包
+    ```c
+    extern ssize_t recv (int __fd, void *__buf, size_t __n, int __flags);
+
+    ```
 
 
-* **summary (CS Framework)**
+  * `> 0`: 接收到的字节数。
+  * `= 0`: **重要！** 这代表对端关闭了连接 (FIN 包)。TCP 是全双工的，0 字节读意味着 Read 通道关闭。
+  * `< 0`: 出错 (Error)，需要检查 errno。
+  * 而在dup中可以直接发送长度为0的数据包
+
+
+  * **summary (CS Framework)**
 * **TCP C/S 交互流程图**：
 
 
-```text
-    [Server]                  [Client]
-   socket()                  socket()
-      |                         |
-    bind()                      |
-      |                         |
-   listen()                     |
-      |                         |
-   accept() <---(3-Way)---> connect()
-  (Block...)   Handshake        |
-      |                         |
-    recv() <----(Data)-----   send()
-      |                         |
-    send()  ----(Data)---->   recv()
-      |                         |
-   close() <----(4-Way)--->  close()
-                Wavehand
+    ```text
+        [Server]                  [Client]
+      socket()                  socket()
+          |                         |
+        bind()                      |
+          |                         |
+      listen()                     |
+          |                         |
+      accept() <---(3-Way)---> connect()
+      (Block...)   Handshake        |
+          |                         |
+        recv() <----(Data)-----   send()
+          |                         |
+        send()  ----(Data)---->   recv()
+          |                         |
+      close() <----(4-Way)--->  close()
+                    Wavehand
 
-```
+    ```
 
 
 * **03_server_fork.c**
-* 这里是通过多进程的方式来实现并发。
+  * 这里是通过多进程的方式来实现并发。
 
 
-```c
-extern __pid_t fork (void) __THROWNL;
-
-```
-
-
-* **Fork 的魔法**：调用一次，返回两次。
-* 返回 `> 0` (子进程 PID)：当前是父进程，任务是继续 `accept` 等待新人。
-* 返回 `0`：当前是子进程，继承了父进程的所有资源（包括 socket），任务是处理刚刚那个连接的 `send/recv`。
-* **COW (Copy On Write)**：Linux 这里的效率很高，并不会真的立马把父进程所有内存复制一份，只有当子进程尝试修改数据时，才会真正复制内存页。
+    ```c
+    extern __pid_t fork (void) __THROWNL;
+    ```
 
 
-* **僵尸进程与信号回收**：
-* 子进程结束时如果父进程不管，它会变成“僵尸进程”占用 PID 资源。
-* 我们利用 `signal` 机制来异步回收。
+  * **Fork 的魔法**：调用一次，返回两次。
+  * 返回 `> 0` (子进程 PID)：当前是父进程，任务是继续 `accept` 等待新人。
+  * 返回 `0`：当前是子进程，继承了父进程的所有资源（包括 socket），任务是处理刚刚那个连接的 `send/recv`。
+  * **COW (Copy On Write)**：Linux 这里的效率很高，并不会真的立马把父进程所有内存复制一份，只有当子进程尝试修改数据时，才会真正复制内存页。
 
+
+  * **僵尸进程与信号回收**：
+  * 子进程结束时如果父进程不管，它会变成“僵尸进程”占用 PID 资源。
+  * 我们利用 `signal` 机制来异步回收。
 
 
 
-```c
-// 注册信号处理函数
-signal(SIGCHLD, handler);
 
-void handler(int sig){
-  // 循环回收所有已结束的子进程
-  while((waitpid(-1, NULL, WNOHANG)) > 0){}
-}
+    ```c
+    // 注册信号处理函数
+    signal(SIGCHLD, handler);
 
-```
+    void handler(int sig){
+      // 循环回收所有已结束的子进程
+      while((waitpid(-1, NULL, WNOHANG)) > 0){}
+    }
+
+    ```
 
 
-* **Waitpid 参数详解**：
-* `-1`: 等待任意子进程。
-* `NULL`: 不关心子进程具体的退出状态码 (exit code)。
-* `WNOHANG`: **非阻塞关键**。如果当前没有子进程结束，立刻返回 0，不要卡在这里傻等。这保证了 Server 不会因为回收垃圾而停止响应新请求。
+  * **Waitpid 参数详解**：
+  * `-1`: 等待任意子进程。
+  * `NULL`: 不关心子进程具体的退出状态码 (exit code)。
+  * `WNOHANG`: **非阻塞关键**。如果当前没有子进程结束，立刻返回 0，不要卡在这里傻等。这保证了 Server 不会因为回收垃圾而停止响应新请求。
 
 
 
 
 * **04_server_thread.c**
-* 使用多线程处理。进程是资源分配的单位（重），线程是 CPU 调度的单位（轻）。
+  * 使用多线程处理。进程是资源分配的单位（重），线程是 CPU 调度的单位（轻）。
 
 
-```c
-extern int pthread_create (pthread_t *__restrict __newthread,
-       const pthread_attr_t *__restrict __attr,
-       void *(*__start_routine) (void *),
-       void *__restrict __arg) __THROWNL __nonnull ((1, 3));
+    ```c
+    extern int pthread_create (pthread_t *__restrict __newthread,
+          const pthread_attr_t *__restrict __attr,
+          void *(*__start_routine) (void *),
+          void *__restrict __arg) __THROWNL __nonnull ((1, 3));
 
-```
-
-
-* **参数详解**：
-* `__newthread`: 指向线程 ID 的指针，用于接收新线程 ID。
-* `__attr`: 线程属性，通常传 `NULL` 使用默认值。
-* `__start_routine`: 线程启动后要执行的函数指针。
-* `__arg`: 传给启动函数的唯一参数。由于只能传一个，所以通常需要把 socket、IP 等信息打包成结构体，转为 `void*` 传入。
+    ```
 
 
-* **编译指令**：
+  * **参数详解**：
+  * `__newthread`: 指向线程 ID 的指针，用于接收新线程 ID。
+  * `__attr`: 线程属性，通常传 `NULL` 使用默认值。
+  * `__start_routine`: 线程启动后要执行的函数指针。
+  * `__arg`: 传给启动函数的唯一参数。由于只能传一个，所以通常需要把 socket、IP 等信息打包成结构体，转为 `void*` 传入。
 
 
-```bash
-gcc server_thread.c -o server -lpthread
-```
+  * **编译指令**：
 
 
-* **自动垃圾回收 (Detach)**：
+    ```bash
+    gcc server_thread.c -o server -lpthread
+    ```
 
 
-```c
-pthread_detach(pthread_self());
-```
+  * **自动垃圾回收 (Detach)**：
 
 
-* **原理**：默认情况下线程是 `joinable` 的，退出后需要主线程调用 `pthread_join` 来“收尸”。调用 `detach` 是告诉内核：“这个线程也是个普通打工人，死了直接埋了就行”，内核会在线程退出时自动释放其栈空间和资源，无需主线程操心。
+    ```c
+    pthread_detach(pthread_self());
+    ```
+
+
+  * **原理**：默认情况下线程是 `joinable` 的，退出后需要主线程调用 `pthread_join` 来“收尸”。调用 `detach` 是告诉内核：“这个线程也是个普通打工人，死了直接埋了就行”，内核会在线程退出时自动释放其栈空间和资源，无需主线程操心。
 
 
 * **05_server_noblock.c**
-* 在这个文件里面我们尝试将 socket 设置为非阻塞 (Non-blocking)。这是迈向高性能 IO (Epoll/IOCP) 的第一步。
+  * 在这个文件里面我们尝试将 socket 设置为非阻塞 (Non-blocking)。这是迈向高性能 IO (Epoll/IOCP) 的第一步。
 
 
-```c
-// 获取当前 flag
-int flag = fcntl(sockfd, F_GETFL, 0);
-// 设置新 flag = 旧 flag + 非阻塞位
-fcntl(sockfd, F_SETFL, flag | O_NONBLOCK, 0);
+    ```c
+    // 获取当前 flag
+    int flag = fcntl(sockfd, F_GETFL, 0);
+    // 设置新 flag = 旧 flag + 非阻塞位
+    fcntl(sockfd, F_SETFL, flag | O_NONBLOCK, 0);
 
-```
+    ```
 
-* **位运算图解**：
-* `fcntl` 通过位掩码来管理状态。
-* `flag` (假设): `0000 0010` (代表已有的属性)
-* `O_NONBLOCK`: `0000 0100` (非阻塞属性)
-* `|` (OR) 操作: `0000 0110` (同时拥有两种属性)
+  * **位运算图解**：
+  * `fcntl` 通过位掩码来管理状态。
+  * `flag` (假设): `0000 0010` (代表已有的属性)
+  * `O_NONBLOCK`: `0000 0100` (非阻塞属性)
+  * `|` (OR) 操作: `0000 0110` (同时拥有两种属性)
 
 
-* **非阻塞的代价 (Errno)**：
-* 当 socket 非阻塞时，如果 `recv` 缓冲区里没数据，它不会卡住，而是立刻返回 `-1`。
-* 此时必须检查 `errno`。如果 `errno == EAGAIN` (Try again) 或 `EWOULDBLOCK`，说明**“现在没数据，不是出错了，待会再来”**。这使得程序可以在没数据时去干别的事。
+  * **非阻塞的代价 (Errno)**：
+  * 当 socket 非阻塞时，如果 `recv` 缓冲区里没数据，它不会卡住，而是立刻返回 `-1`。
+  * 此时必须检查 `errno`。如果 `errno == EAGAIN` (Try again) 或 `EWOULDBLOCK`，说明**“现在没数据，不是出错了，待会再来”**。这使得程序可以在没数据时去干别的事。
 
 
 * **06_server_epoll.c**
-* **Epoll**: Linux 下最高效的 IO 多路复用器。它解决了 `select/poll` 轮询所有 socket 效率低下的问题。
+  * **Epoll**: Linux 下最高效的 IO 多路复用器。它解决了 `select/poll` 轮询所有 socket 效率低下的问题。
 
 
-```c
-extern int epoll_create1 (int __flags) __THROW;
-```
+    ```c
+    extern int epoll_create1 (int __flags) __THROW;
+    ```
 
 
-* 创建一个 epoll 实例（红黑树根节点），返回句柄 `epfd`。
+  * 创建一个 epoll 实例（红黑树根节点），返回句柄 `epfd`。
 
 
-```c
-struct epoll_event {
-    uint32_t events;  /* Epoll events */
-    epoll_data_t data; /* User data variable */
-} __EPOLL_PACKED;
-```
+    ```c
+    struct epoll_event {
+        uint32_t events;  /* Epoll events */
+        epoll_data_t data; /* User data variable */
+    } __EPOLL_PACKED;
+    ```
 
 
-* **核心参数**：
-* `events`: 感兴趣的事件。
-* `EPOLLIN`: 有数据可读 (包括新连接)。
-* `EPOLLET`: **边缘触发 (Edge Triggered)**。数据这就只有一次通知，没读完下次不提醒（高效但难写）。默认是 **LT (Level Triggered)**，没读完一直提醒。
+  * **核心参数**：
+  * `events`: 感兴趣的事件。
+  * `EPOLLIN`: 有数据可读 (包括新连接)。
+  * `EPOLLET`: **边缘触发 (Edge Triggered)**。数据这就只有一次通知，没读完下次不提醒（高效但难写）。默认是 **LT (Level Triggered)**，没读完一直提醒。
 
-* `data`:data里面有多种数据结构，这里我们使用文件描述符
-* `data.fd`: 记录是哪个 socket 发生了事件。
-
-
-```c
-extern int epoll_ctl (int __epfd, int __op, int __fd,
-        struct epoll_event *__event) __THROW;
-
-```
+  * `data`:data里面有多种数据结构，这里我们使用文件描述符
+  * `data.fd`: 记录是哪个 socket 发生了事件。
 
 
-* **操作类型 (`__op`)**:
-* `EPOLL_CTL_ADD`: 注册新的 socket。
-* `EPOLL_CTL_MOD`: 修改监听事件。
-* `EPOLL_CTL_DEL`: 移除 socket。
+    ```c
+    extern int epoll_ctl (int __epfd, int __op, int __fd,
+            struct epoll_event *__event) __THROW;
+    ```
 
+
+  * **操作类型 (`__op`)**:
+  * `EPOLL_CTL_ADD`: 注册新的 socket。
+  * `EPOLL_CTL_MOD`: 修改监听事件。
+  * `EPOLL_CTL_DEL`: 移除 socket。
 
 
 
-```c
-extern int epoll_wait (int __epfd, struct epoll_event *__events,
-         int __maxevents, int __timeout)
 
-```
+    ```c
+    extern int epoll_wait (int __epfd, struct epoll_event *__events,
+            int __maxevents, int __timeout)
+    ```
 
 
-* **Event Loop 逻辑**：
-* `epoll_wait` 阻塞等待，一旦有 socket 就绪，它会将这就绪的 socket 填入 `__events` 数组并返回数量 `n`。
-* 我们只需要遍历这 `n` 个活跃的 socket，而不需要遍历所有 10000 个 socket。
-* **分流处理**：
-* 如果 `events[i].data.fd == listen_fd`: 说明有新连接 -> 调用 `accept` -> `epoll_ctl(ADD)` 加入监控。
-* 否则: 说明是已连接的客户端发数据了 -> 调用 `recv/send` 处理业务。
+  * **Event Loop 逻辑**：
+  * `epoll_wait` 阻塞等待，一旦有 socket 就绪，它会将这就绪的 socket 填入 `__events` 数组并返回数量 `n`。
+  * 我们只需要遍历这 `n` 个活跃的 socket，而不需要遍历所有 10000 个 socket。
+  * **分流处理**：
+  * 如果 `events[i].data.fd == listen_fd`: 说明有新连接 -> 调用 `accept` -> `epoll_ctl(ADD)` 加入监控。
+  * 否则: 说明是已连接的客户端发数据了 -> 调用 `recv/send` 处理业务。
 
 
 
@@ -652,5 +647,5 @@ extern int epoll_wait (int __epfd, struct epoll_event *__events,
 
 
 * **adding**
-* **总结**：Epoll 用单线程实现了高并发，避免了多线程频繁切换上下文的开销 (Context Switch)。但如果业务逻辑非常耗时（比如计算密集型），单线程会被卡死。
-* **Go 的伏笔**：Go 语言的 Goroutine 实际上就是将“多线程的易用性”和“Epoll 的高性能”结合了起来——底层用 Epoll 监听，上层用轻量级协程伪装成阻塞 IO，我们将在后续部分看到这种天才般的设计。
+  * **总结**：Epoll 用单线程实现了高并发，避免了多线程频繁切换上下文的开销 (Context Switch)。但如果业务逻辑非常耗时（比如计算密集型），单线程会被卡死。
+  * **Go 的伏笔**：Go 语言的 Goroutine 实际上就是将“多线程的易用性”和“Epoll 的高性能”结合了起来——底层用 Epoll 监听，上层用轻量级协程伪装成阻塞 IO，我们将在后续部分看到这种天才般的设计。
