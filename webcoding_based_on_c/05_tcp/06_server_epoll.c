@@ -101,7 +101,7 @@ int main(int argc, char const* argv[]){
     ev.data.fd = sockfd;
     ev.events = EPOLLIN | EPOLLET;
     if((epoll_ctl(epollfd,EPOLL_CTL_ADD,sockfd,&ev))<0){
-        perror("fail to create epoll");
+        perror("fail to add into epoll");
         exit(1);
     }
 

@@ -387,93 +387,293 @@ struct ip_mreq
 * **多播 (Multicast)**：是**接收方**需要 `setsockopt` (加入组 `IP_ADD_MEMBERSHIP`)。因为多播是精准的，发送方只是往一个 D 类 IP 发数据（谁都可以发），关键在于接收方必须显式地声明“我订阅了这个频道”，内核才会把对应的数据包捞上来给你。
 
 
-  
+
 ### 05 TCP Socket (TCP 通信)
+
 * **background**
-  * 尽管再这里tcp和udp的最大区别是tcp有了三次握手四次挥手来保证数据传输，但我们在调用函数进行编程时，这些内容是已经封装好的，换句话说，我们在这里还是去从应用层的角度去考虑事情
-  * 但是tcp的这种设计使得它不能像udp一样通过简单的结构体来管理客户端，建立连接和断开连接的需求使得必须维持监听状态作为管道系统，所以新建socket来管理这个管道就成为必要的，那么并发的关键现在就是如何去管理这些socket
-  * 所以从这里派生出两种思路，一种是将原来阻塞的函数转变为非阻塞的，另一种就是多线程和多携程，在我们后续可以看到的是，这一点并不是矛盾的
- * **01_client** 
-   * 这里展现的是tcp的客户端，在创建好socket和封装好server结构体后，我们首先要调用封装好的函数去建立底层连接
-   ```c
-   extern int connect (int __fd, __CONST_SOCKADDR_ARG __addr, socklen_t __len);
-   ```
-   * todo解释connetc函数内部的底层机制
-   * 在client这一方只有一个socket作为对应接口所以说我们这里的send函数直接对这个socket进行操作即可，并不需要将server的对应信息也传入进去。
-   ```c
-   extern ssize_t send (int __fd, const void *__buf, size_t __n, int __flags);
-   ```
-   * 这里的逻辑就是connetc之后client和server之间已经建立了稳定的通道联系，不需要再用结构体来指向一个server
-* **adding**
-  * 需要注意的是，无论是send还是sendto发送时都不要用整个缓冲区数组大小，而是用strlen
-  * todo解释这种现象
+  * 尽管在这里 tcp 和 udp 的最大区别是 tcp 有了三次握手四次挥手来保证数据传输，但我们在调用函数进行编程时，这些复杂的状态流转大多已被内核封装。换句话说，我们在这里更多是从**应用层**的角度去考虑 socket 的生命周期管理。
+  * **设计哲学的转变**：UDP 是无状态的，一个 socket 可以给任意 IP 发包；但 TCP 是面向连接的，就像打电话，必须先接通才能说话。这种设计要求服务端必须维持一个“监听 socket”专门用来接客，每来一个客人（客户端），就得新建一个“服务 socket”专门负责聊天。
+  * **并发的核心矛盾**：如何高效地管理这些成百上千的“服务 socket”？这就派生出了两条技术路线：
+    1. **多进程/多线程**：通过增加人手（CPU调度单元）来解决，一个连接对应一个线程/进程。
+    2. **IO 多路复用 (Non-blocking)**：通过非阻塞 IO + 事件轮询（如 epoll），让一个服务员（单线程）就能看管所有桌子。
+
+
+
+
+* **01_client**
+  * 这里展现的是 tcp 的客户端，在创建好 socket 和封装好 server 结构体后，我们首先要调用封装好的函数去建立底层连接。
+
+
+    ```c
+    extern int connect (int __fd, __CONST_SOCKADDR_ARG __addr, socklen_t __len);
+    ```
+
+  *  **Connect 的底层机制 (三次握手触发器)**：
+   * 当调用 `connect` 时，内核会向 Server 发送一个 **SYN** 包。
+   * 此时函数处于阻塞状态，等待 Server 回复 **SYN+ACK**。
+   * 收到回复后，Client 再发送一个 **ACK**，此时连接建立 (ESTABLISHED)，函数返回 0。
+
+
+   * 在 client 这一方通常只需要维护一个 socket，建立连接后，内核已经把这个 socket 绑定到了特定的远端 IP 和端口，所以 `send` 函数不需要像 `sendto` 那样重复指定目标地址。
+
+      ```c
+      extern ssize_t send (int __fd, const void *__buf, size_t __n, int __flags);
+      ```
+
+
+* **adding (Buffer Trap)**
+  * **strlen vs sizeof 的大坑**：发送字符串时，**千万不要用 `sizeof(buf)`，要用 `strlen(buf)`。
+  
+  * **原因**：`sizeof` 计算的是数组申请的总内存（比如 1024），而 `strlen` 计算的是实际字符长度（比如 "hello" 是 5）。如果你用 `sizeof`，你会把缓冲区里后面几百个没用的乱码（垃圾数据）也发给对方，这在处理协议时是灾难性的。
+
+
+
+
 * **02_server.c**
-  * 这里是tcp服务器的实例。在创建好socket和填充绑定好结构体后，首先要将socket设置为监听状态
-  ```c
-  extern int listen (int __fd, int __n) __THROW;
-  ```
-  * `fd`:是之前创建的文件描述符
-  * `n`:是最大的监听数量
-  * todo：解释设置监听状态的必要性和底层原理
-  * 在设置好监听状态后要通过accept来获取到client connect的连接请求
-  ```c
-  extern int accept (int __fd, __SOCKADDR_ARG __addr,
-	 socklen_t *__restrict __addr_len);
-  ```
-  * 需要注意的是`_addr`是client的相关网络数据信息，和recvfrom一样，需要预先设置空结构体填充，这里主要是适用于日志功能和其他
-  * 最重要的点是，在这里返回了一个int值，这个int就是用来管理和新建client连接的文件描述符，这样在一个tcp系统中存在两种文件描述符，一种是用来监听的socket，另一种是用来进行通信的socket的，这两种文件描述符的存在实际上是tcp数据流连接的必然结果，udp是数据包连接，所以只需要知道对应地址进行信息发送即可，但是tcp是流式连接，需要一个文件描述符来管理这个io流
-  ```c
-  extern ssize_t recv (int __fd, void *__buf, size_t __n, int __flags);
-  ```
-  * 在这里recv和send函数一样，都只需要对这个socket进行处理就行，但是在这里和recvfrom不同的是，recv的返回值必须做处理
-  * 在tcp中不允许发送长度为0的数据包，因为这被认为是断开连接的标志，所以必须判断recv的返回值是否为0的情况，这里的异常有两种情况，所以必须要有数据结构承载来进行多次判断逻辑
-  * 在这里我们可以看到当我们去对accept产生的socekt的进行读写操作时，监听socket时没有办法访问的，后续的代码都是在致力于解决这个问题。
-* **summary**
-  * todo补充一下tcp连接的图形化cs框架描述
+  * 这里是 tcp 服务器的实例。在创建好 socket 和填充绑定好结构体后，首先要将 socket 设置为监听状态。
+     ```c
+    extern int listen (int __fd, int __n) __THROW;
+    ```
+
+  * `__fd`: 之前创建的套接字文件描述符。
+  * `__n`: **Backlog (积压队列长度)**。
+  * **为什么需要 Listen**：
+  * 内核为监听套接字维护了两个队列：**半连接队列** (收到 SYN 但没收到最终 ACK) 和 **全连接队列** (三次握手完成等待 Accept 取走)。
+  * `__n` 实际上决定了这些队列（通常是全连接队列）的大小。如果队列满了，新的连接请求就会被直接丢弃或拒绝（SYN Flood 攻击也是针对这里）。
+
+
+* 设置好监听状态后，通过 `accept` 从全连接队列中取出一个已完成的连接。
+
+
+```c
+extern int accept (int __fd, __SOCKADDR_ARG __addr,
+ socklen_t *__restrict __addr_len);
+
+```
+
+
+* **两个 FD 的故事**：
+* `accept` 返回的 `int` 是一个**全新的文件描述符** (Connected Socket)。
+* **设计哲学**：原来的 `sockfd` 是“门迎”，只负责把人领进门；`accept` 返回的 `fd` 是“服务员”，专门负责这一桌的通信。这种分离设计使得 TCP Server 可以同时处理握手请求和数据传输。
+
+
+* **Recv 的返回值判断**：
+
+
+```c
+extern ssize_t recv (int __fd, void *__buf, size_t __n, int __flags);
+
+```
+
+
+* `> 0`: 接收到的字节数。
+* `= 0`: **重要！** 这代表对端关闭了连接 (FIN 包)。TCP 是全双工的，0 字节读意味着 Read 通道关闭。
+* `< 0`: 出错 (Error)，需要检查 errno。
+
+
+* **summary (CS Framework)**
+* **TCP C/S 交互流程图**：
+
+
+```text
+    [Server]                  [Client]
+   socket()                  socket()
+      |                         |
+    bind()                      |
+      |                         |
+   listen()                     |
+      |                         |
+   accept() <---(3-Way)---> connect()
+  (Block...)   Handshake        |
+      |                         |
+    recv() <----(Data)-----   send()
+      |                         |
+    send()  ----(Data)---->   recv()
+      |                         |
+   close() <----(4-Way)--->  close()
+                Wavehand
+
+```
+
+
 * **03_server_fork.c**
-  * 这里是通过多进程的方式来解决、
-  ```c
-  extern __pid_t fork (void) __THROWNL;
-  ```
-  * 这个函数直接调用就可以，返回pid作为进程的标识符
-  * todo解释一下pid的底层原理，解释一下不同pid大小对应的不同进程类型
-  * 我们对不同进程分别处理，父进程继续监听，子进程用来处理io流，来实现阻塞函数的分别处理
-  * 在这里需要注意的是进程死亡垃圾回收的问题，我们在这里采用signal来捕捉处理进程死亡的信号
-  ```c
-    extern __sighandler_t __REDIRECT_NTH (signal,
-		      (int __sig, __sighandler_t __handler),
-		  __sysv_signal);
-  ```
-  * todo解释调整这段代码的结构
-  * `_sig`:是系统级别的信号，这个用来选择该去标识对哪一个信号进行处理
-  * `_handler`:是自定义函数，当捕捉到这个信号时，自动运行这个函数
-  ```c
-  void handler(int sig){
-    while((waitpid(-1,NULL,WNOHANG))>0){}
-  }
-  ```
-  * `int sig`为了增强函数的复用性
-  * `waitpid` 用来回收所有的死亡进程
-* **adding** 
-  ```c
-  extern __pid_t waitpid (__pid_t __pid, int *__stat_loc, int __options);
-  ```
-  * `_pid_t`:这个是用来标记那些线程需要处理，-1代表所用线程
-  * `_stat_loc`:todo解释这个参数作用
-  * `_options`:todo解释这个参数和wnohang是什么意思
+* 这里是通过多进程的方式来实现并发。
+
+
+```c
+extern __pid_t fork (void) __THROWNL;
+
+```
+
+
+* **Fork 的魔法**：调用一次，返回两次。
+* 返回 `> 0` (子进程 PID)：当前是父进程，任务是继续 `accept` 等待新人。
+* 返回 `0`：当前是子进程，继承了父进程的所有资源（包括 socket），任务是处理刚刚那个连接的 `send/recv`。
+* **COW (Copy On Write)**：Linux 这里的效率很高，并不会真的立马把父进程所有内存复制一份，只有当子进程尝试修改数据时，才会真正复制内存页。
+
+
+* **僵尸进程与信号回收**：
+* 子进程结束时如果父进程不管，它会变成“僵尸进程”占用 PID 资源。
+* 我们利用 `signal` 机制来异步回收。
+
+
+
+
+```c
+// 注册信号处理函数
+signal(SIGCHLD, handler);
+
+void handler(int sig){
+  // 循环回收所有已结束的子进程
+  while((waitpid(-1, NULL, WNOHANG)) > 0){}
+}
+
+```
+
+
+* **Waitpid 参数详解**：
+* `-1`: 等待任意子进程。
+* `NULL`: 不关心子进程具体的退出状态码 (exit code)。
+* `WNOHANG`: **非阻塞关键**。如果当前没有子进程结束，立刻返回 0，不要卡在这里傻等。这保证了 Server 不会因为回收垃圾而停止响应新请求。
+
+
+
+
 * **04_server_thread.c**
-  * 使用多线程进行处理
+* 使用多线程处理。进程是资源分配的单位（重），线程是 CPU 调度的单位（轻）。
 
----
 
-## 🚀 如何运行 (How to Run)
+```c
+extern int pthread_create (pthread_t *__restrict __newthread,
+       const pthread_attr_t *__restrict __attr,
+       void *(*__start_routine) (void *),
+       void *__restrict __arg) __THROWNL __nonnull ((1, 3));
 
-在 WSL 或 Linux 终端中，使用 gcc 编译对应文件。例如：
+```
+
+
+* **参数详解**：
+* `__newthread`: 指向线程 ID 的指针，用于接收新线程 ID。
+* `__attr`: 线程属性，通常传 `NULL` 使用默认值。
+* `__start_routine`: 线程启动后要执行的函数指针。
+* `__arg`: 传给启动函数的唯一参数。由于只能传一个，所以通常需要把 socket、IP 等信息打包成结构体，转为 `void*` 传入。
+
+
+* **编译指令**：
+
 
 ```bash
-# 编译
-gcc 01_basic/01_endian.c -o endian
+gcc server_thread.c -o server -lpthread
 
-# 运行
-./endian
 ```
+
+
+* **自动垃圾回收 (Detach)**：
+
+
+```c
+pthread_detach(pthread_self());
+
+```
+
+
+* **原理**：默认情况下线程是 `joinable` 的，退出后需要主线程调用 `pthread_join` 来“收尸”。调用 `detach` 是告诉内核：“这个线程也是个打工人的命，死了直接埋了就行”，内核会在线程退出时自动释放其栈空间和资源，无需主线程操心。
+
+
+* **05_server_noblock.c**
+* 在这个文件里面我们尝试将 socket 设置为非阻塞 (Non-blocking)。这是迈向高性能 IO (Epoll/IOCP) 的第一步。
+
+
+```c
+// 获取当前 flag
+int flag = fcntl(sockfd, F_GETFL, 0);
+// 设置新 flag = 旧 flag + 非阻塞位
+fcntl(sockfd, F_SETFL, flag | O_NONBLOCK, 0);
+
+```
+
+
+* **位运算图解**：
+* `fcntl` 通过位掩码来管理状态。
+* `flag` (假设): `0000 0010` (代表已有的属性)
+* `O_NONBLOCK`: `0000 0100` (非阻塞属性)
+* `|` (OR) 操作: `0000 0110` (同时拥有两种属性)
+
+
+* **非阻塞的代价 (Errno)**：
+* 当 socket 非阻塞时，如果 `recv` 缓冲区里没数据，它不会卡住，而是立刻返回 `-1`。
+* 此时必须检查 `errno`。如果 `errno == EAGAIN` (Try again) 或 `EWOULDBLOCK`，说明**“现在没数据，不是出错了，待会再来”**。这使得程序可以在没数据时去干别的事。
+
+
+
+
+* **06_server_epoll.c**
+* **Epoll**: Linux 下最高效的 IO 多路复用器。它解决了 `select/poll` 轮询所有 socket 效率低下的问题。
+
+
+```c
+extern int epoll_create1 (int __flags) __THROW;
+
+```
+
+
+* 创建一个 epoll 实例（红黑树根节点），返回句柄 `epfd`。
+
+
+```c
+struct epoll_event {
+    uint32_t events;  /* Epoll events */
+    epoll_data_t data; /* User data variable */
+} __EPOLL_PACKED;
+
+```
+
+
+* **核心参数**：
+* `events`: 感兴趣的事件。
+* `EPOLLIN`: 有数据可读 (包括新连接)。
+* `EPOLLET`: **边缘触发 (Edge Triggered)**。数据这就只有一次通知，没读完下次不提醒（高效但难写）。默认是 **LT (Level Triggered)**，没读完一直提醒。
+
+
+* `data.fd`: 记录是哪个 socket 发生了事件。
+
+
+
+
+```c
+extern int epoll_ctl (int __epfd, int __op, int __fd,
+        struct epoll_event *__event) __THROW;
+
+```
+
+
+* **操作类型 (`__op`)**:
+* `EPOLL_CTL_ADD`: 注册新的 socket。
+* `EPOLL_CTL_MOD`: 修改监听事件。
+* `EPOLL_CTL_DEL`: 移除 socket。
+
+
+
+
+```c
+extern int epoll_wait (int __epfd, struct epoll_event *__events,
+         int __maxevents, int __timeout)
+
+```
+
+
+* **Event Loop 逻辑**：
+* `epoll_wait` 阻塞等待，一旦有 socket 就绪，它会将这就绪的 socket 填入 `__events` 数组并返回数量 `n`。
+* **O(1) 复杂度**：我们只需要遍历这 `n` 个活跃的 socket，而不需要遍历所有 10000 个 socket。
+* **分流处理**：
+* 如果 `events[i].data.fd == listen_fd`: 说明有新连接 -> 调用 `accept` -> `epoll_ctl(ADD)` 加入监控。
+* 否则: 说明是已连接的客户端发数据了 -> 调用 `recv/send` 处理业务。
+
+
+
+
+
+
+* **adding**
+* **总结**：Epoll 用单线程实现了高并发，避免了多线程频繁切换上下文的开销 (Context Switch)。但如果业务逻辑非常耗时（比如计算密集型），单线程会被卡死。
+* **Go 的伏笔**：Go 语言的 Goroutine 实际上就是将“多线程的易用性”和“Epoll 的高性能”结合了起来——底层用 Epoll 监听，上层用轻量级协程伪装成阻塞 IO，我们将在后续章节看到这种天才般的设计。
